@@ -1,427 +1,113 @@
 import pylru
-from .radix import RadixNode, RadixPrefix
+from radix import RadixNode, RadixPrefix, RadixTree
+from pprint import pprint
 
-class Aggradix(object):
-    '''Radix Tree for IPv6 address with aggregation.
+def init_or_add(dic, key, val):
+    if key in dic.keys():
+        dic[key] += val
+    else:
+        dic[key] = val
 
-    Represents Radix Tree with LRU cache. It automatically aggregates itself.
+class AggradixNode(RadixNode):
+    n_node = 0
+
+    def __init__(self, node_id=None):
+        super(AggradixNode, self).__init__()
+        if node_id is None:
+            self.node_id = AggradixNode.n_node
+            AggradixNode.n_node += 1
+        else:
+            self.node_id = node_id
+
+    def set(self, prefix):
+        self.prefix = prefix
+        self.bitlen = prefix.bitlen
+        self.data = {"count": {}}
+        self.free = False
+
+    def reset(self):
+        self.prefix = None
+        self.left = None
+        self.right = None
+        self.data = {"count": {}}
+        self.free = True
     
-    Attributes:
-        max_nodes (int): maximum number of nodes in Radix Tree.
-        free_nodes (int): number of nodes which is not in tree.
-        maxbits (int): maximum length of bits of IPv6 address (fixed).
-        packet_count (int): number of packets input.
-        cache (pyrlu): LRU cache used when aggregation.
-        last_leaf_cache (RadixNode): pointer to the last leaf cache in LRU cache.
-        head (RadixNode): pointer to head node.
-    '''
-    def __init__(self, root="::", bitlen=0, max_nodes=16):
-        self.max_nodes = max_nodes - 2
-        self.free_nodes = self.max_nodes
-        self.maxbits = 128
+    def __str__(self):
+        return str(self.prefix)
+
+class AggradixTree(RadixTree):
+    def __init__(self, prefix, maxnode=64):
+        super(AggradixTree, self).__init__()
+        head = AggradixNode(node_id=-1)
+        head.set(RadixPrefix(prefix))
+        self.head = head
+        self.maxnode = maxnode - 1
+        self.free_nodes = self.maxnode
         self.packet_count = 0
-        self.cache = pylru.lrucache(self.max_nodes)
-        self.last_leaf_cache = self.cache.head.prev
-        self._init_lru()
-        self._init_head(root, bitlen)
+        self.nodes = pylru.lrucache(self.maxnode)
+        self.active_leaf_cache = self.nodes.head.prev
+        self._lru_init()
 
-    def _init_lru(self):
-        '''Initialize LRU cache with ${max_nodes} of empty RadixNode.'''
-        for i in range(self.max_nodes):
-            self.cache[i] = RadixNode()
+    def _lru_init(self):
+        for i in range(self.maxnode):
+            self.nodes[i] = AggradixNode()
 
-    def _init_head(self, address, prefixlen):
+    def _lru_get_free(self):
         '''
-        Initalize head node with specific address space.
-        ex) head node -> 2001:db8::/48
+        get free node
+        Args:
+        Returns:
+            AggradixNode: free node
+        '''
+        entry = self.nodes.head.prev
+        while entry is not None:
+            if entry.empty or not entry.value.free:
+                entry = entry.prev
+                continue
+            
+            return entry.value
+
+    def _lru_get_active(self):
+        '''
+        get Least Recent Used "active" node
+        
+        Args:
+        Returns:
+            AggradixNode: Least Recent Used "active" node
+        '''
+        entry = self.active_leaf_cache
+        while entry != self.active_leaf_cache.next:
+            if entry.empty or entry.value.free or entry.value.right is not None:
+                entry = entry.prev
+                continue
+
+            self.active_leaf_cache = entry.prev
+            return entry.value
+
+    def _lru_move_tail(self, node):
+        '''
+        insert node to the tail of LRU cache.
 
         Args:
-            address (str): IPv6 network address.
-            prefixlen (int): IPv6 network prefix length. 
+            node (AggradixNode): node to be inserted into the tail
         '''
-        node = RadixNode(node_id=-1)
-        node.set(RadixPrefix(address, prefixlen))
-        self.head = node
+        # move to the top
+        self.nodes[node.node_id] = node
+        
+        # move to the tail
+        entry = self.nodes.head
+        self.nodes.head = entry.next
 
-    def add_count(self, src_addr, dst_addr):
+    def _common_prefix(self, node1, node2):
         '''
-        Search for ${dst_addr}/128.
-        If failed, insert a node whose label is ${dst_addr}/128.
-        Finally, add count of its hash table.
+        Generate common prefix of node1 and node2.
 
         Args:
-            src_addr (str | bytearray): source IPv6 address.
-            dst_addr (str | bytearray): destination IPv6 address.
+            node1 (RadixNode)
+            node2 (RadixNode)
 
         Returns:
-            RadixNode: found or inserted node.
-        '''
-        node = self.find_or_insert(dst_addr)
-
-        if src_addr in node.data:
-            node.data[src_addr] += 1
-        else:
-            node.data[src_addr] = 1
-        self.packet_count += 1
-
-        return node
-
-    def find_or_insert(self, address, prefixlen=128):
-        '''
-        Search for ${address}/${masklen}.
-        If failed, insert a node whose label is ${dst_addr}/${masklen}.
-        When LRU cache is full, aggregate the tree.
-
-        Args:
-            address (str | bytearray): IPv6 address to search.
-            masklen (int): IPv6 prefix size.
-        
-        Returns:
-            RadixNode: found or inserted node whose label is ${address}/${masklen}.
-
-        '''
-        target_prefix = RadixPrefix(address, prefixlen)
-
-        # When LRU cahce is full, reclaim nodes to make space for new nodes.
-        if self.free_nodes <= 2:
-            self.reclaim_node(2)
-
-        addr = target_prefix.addr
-        node = self.head
-
-        while True:
-            # When ${prefix} is not contained in ${node}'s prefix.
-            if not (self.prefix_cmp(node.prefix, target_prefix)):
-                return self.leaf_alloc(node, target_prefix)
-
-            # When search succeeded.
-            ## If ${prefix} is contained in ${node}'s prefix AND prefix sizes are the same,
-            ## ${node} is the target.
-            elif (node.prefix.bitlen == target_prefix.bitlen):
-                return node
-
-            # When we cannot traverse tree more.
-            elif (node.right is None):
-                return self.leaf_alloc(node, target_prefix)
-
-            # When we can traverse tree more.
-            if (node.bitlen < self.maxbits and self.addr_test(addr, node.bitlen)):
-                node = node.right
-            else:
-                node = node.left
-
-    def search_best(self, address, prefixlen, head=None):
-        '''
-        Search Tree and returns best-match node.
-
-        Args:
-            address (str | bytearray): IPv6 network address to search.
-            prefixlen (int): IPv6 network prefix to search.
-            head (RadixNode): If given, search starts from the node.
-        
-        Returns:
-            RadixNode | None: found node.
-        '''
-        prefix = RadixPrefix(address, prefixlen)
-
-        if self.head is None:
-            return None
-
-        if head is None:
-            node = self.head
-        
-        addr = prefix.addr
-        bitlen = prefix.bitlen
-        stack = []
-        while node.bitlen < bitlen:
-            stack.append(node)
-            if self.addr_test(addr, node.bitlen):
-                node = node.right
-            else:
-                node = node.left
-            if node is None:
-                break
-        
-        if node is not None:
-            stack.append(node)
-        
-        if len(stack) <= 0:
-            return None
-
-        for node in stack[::-1]:
-            if (self.prefix_match(node.prefix, prefix, node.bitlen) and node.bitlen <= bitlen):
-               return node
-        return None
-
-    def search_worst(self, address, prefixlen):
-        '''
-        Search Tree and return worst-match node.
-
-        Args:
-            address (str | bytearray): IPv6 network address to search.
-            prefixlen (int): IPv6 network prefix to search.
-        
-        Returns:
-            RadixNode | None: found node.
-        '''
-        prefix = RadixPrefix(address, prefixlen)
-        if self.head is None:
-            return None
-        node = self.head
-        addr = prefix.addr
-        bitlen = prefix.bitlen
-
-        stack = []
-        while node.bitlen < bitlen:
-            stack.append(node)
-            if self.addr_test(addr, node.bitlen):
-                node = node.right
-            else:
-                node = node.left
-            if node is None:
-                break
-
-        if node is not None:
-            stack.append(node)
-
-        if len(stack) <= 0:
-            return None
-
-        for node in stack:
-            # print(node)
-            if self.prefix_match(node.prefix, prefix, node.bitlen):
-                return node
-        return None
-
-    def search_covered(self, address, prefixlen):
-        prefix = RadixPrefix(address, prefixlen)
-
-        results = []
-        if self.head is None:
-            return results
-        node = self.head
-        addr = prefix.addr
-        bitlen = prefix.bitlen
-
-        while node.bitlen < bitlen:
-            if self.addr_test(addr, node.bitlen):
-                node = node.right
-            else:
-                node = node.left
-            if node is None:
-                return results
-        
-        stack = [node]
-        while stack:
-            node = stack.pop()
-            if self.prefix_match(node.prefix, prefix, prefix.bitlen):
-                results.append(node)
-            if node.right:
-                stack.append(node.right)
-            if node.left:
-                stack.append(node.left)
-        return results
-
-    def search_covered_top(self, address, prefixlen, node=None):
-        '''
-        Search Tree 
-        It returns the node which is contained in given prefix AND has shortest prefix.
-        If exact-match, it returns the node.
-
-        ex) When tree is like follows,
-
-                           o <-2001:db8::/64
-                          / \
-                ::/101-> o   o <- 2001:db8:0:0:8000::/127
-                        / \
-             ::/128 -> o   o <- ::600:1/128
-
-            # Search for 2001:db8::/96,
-            - when best-match -> 2001:db8::/64
-            + when covered -> 2001:db8::/101
-
-            Nodes contained in ::/96 are [::/101, ::/128, ::600:1/128].
-            And ::/101 has shortest prefix in these nodes.
-
-        Args:
-            address (str | bytearray): IPv6 network address to search.
-            prefixlen (int): IPv6 network prefix to search.
-            node (RadixNode): If given, search starts from the node.
-        
-        Returns:
-            RadixNode | None: found node.
-        '''
-        prefix = RadixPrefix(address, prefixlen)
-        
-        if self.head is None:
-            return None
-        
-        if node is None:
-            node = self.head
-        
-        addr = prefix.addr
-        bitlen = prefix.bitlen
-
-        stack = []
-        while node.bitlen < bitlen:
-            stack.append(node)
-            if self.addr_test(addr, node.bitlen):
-                node = node.right
-            else:
-                node = node.left
-            if node is None:
-                break
-
-        if node is not None:
-            stack.append(node)
-
-        if len(stack) <= 0:
-            return None
-
-        for node in stack[::-1]:
-            if self.prefix_match(node.prefix, prefix, node.bitlen):
-               return node
-        return None
-
-    def search_exact(self, address, prefixlen, head=None):
-        '''
-        Search tree with exact-match.
-
-        Args:
-            address (str | bytearray): IPv6 network address to search.
-            prefixlen (int): IPv6 network prefix to search.
-            head (RadixNode): If given, search starts from the node.
-
-        Returns:
-            RadixNode | None: found node or None.
-        '''
-        target_prefix = RadixPrefix(address, prefixlen)
-        
-        if self.head is None:
-            return None
-
-        if head is None:
-            node = self.head
-        else:
-            node = head
-
-        target_addr = target_prefix.addr # (bytearray)
-        target_prefixlen = target_prefix.bitlen # (int)
-
-        while node.bitlen < target_prefixlen:
-            # right or left or finish
-            if self.addr_test(target_addr, node.bitlen):
-                node = node.right
-            else:
-                node = node.left
-            if node is None:
-                return None
-
-        if node.bitlen > target_prefixlen:
-            return None
-
-        if self.prefix_match(node.prefix, target_prefix, target_prefixlen):
-            return node
-
-        return None
-
-    def collect_probe(self, src_addr, head=None):
-        '''
-        Traverse subtree whose head is ${head}.
-        Create hash table from nodes having entry of ${src_addr}
-
-        ex) hash table is like follows
-            { dst_1/plen_1: n1, ..., dst_i/plen_i: n_i, ... }
-
-        Args:
-            src_addr (str): source IPv6 address.
-            head (RadixNode): node we start traversing.
-
-        Returns:
-            hash: hash table like above.
-        '''
-
-        h = {}
-        stack = []
-        stack.append(head)
-
-        while len(stack) > 0:
-            node = stack.pop()
-            if src_addr in node.data.keys():
-                h[(node.prefix.network, node.prefix.bitlen)] = node.data[src_addr]
-
-            if node.left is not None:
-                stack.append(node.left)
-
-            if node.right is not None:
-                stack.append(node.right)
-
-        return h
-
-
-    def weighted_count(self, src_address, dst_address, masklen):
-        '''
-        dst_address/masklenに含まれるノードのうち，dst_address/128を含む枝の
-        src_addressのカウント合計を求める
-        ノードのプレフィクス長によって重み付けする
-        '''
-        prefix = RadixPrefix(dst_address, 128)
-        addr = prefix.addr
-
-        head = self.search_covered_top(dst_address, masklen)
-        
-        count = 0
-        node = head
-        while node is not None:
-            if src_address in node.data.keys():
-                # ノードのプレフィクス長によってカウント値を調整する場合
-                count += node.data[src_address] * (1/2) ** (128 - node.bitlen)
-
-            if self.addr_test(addr, node.bitlen):
-                node = node.right
-            else:
-                node = node.left
-        return count
-
-    def traverse_postorder(self, node=None):
-        if node == None:
-            return
-        print(node.prefix)
-        self.traverse_postorder(node.left)
-        self.traverse_postorder(node.right)
-    
-    def subtree_sum(self, node=None, count=0):
-        if node == None:
-            return 0
-
-        left_count = self.subtree_sum(node.left, count)
-        right_count = self.subtree_sum(node.right, count)
-        return count + sum(node.data.values()) + left_count + right_count
-
-    def addr_test(self, addr, bitlen):
-        '''
-        [input]
-        addr <bytesarray>: 挿入したいプレフィクスのネットワークアドレス
-        bitlen <int>: 対象ノードのビット長
-        
-        [output]
-        <int>: 0 ならば左，それ以外は右
-        '''
-        left = addr[bitlen >> 3]
-        right = 0x80 >> (bitlen & 0x07)
-        return left & right
-
-    def common_prefix(self, node1, node2):
-        '''
-        [input]
-        node1<RadixNode>
-        node2<RadixNode>
-
-        [output]
-        common_prefix<RadixPrefix>
-
-        [description]
-        node1とnode2が共通にもつ最も小さいプレフィクスを生成する
+            RadixPrefix: common prefix of node1 and node2
         '''
         addr1 = node1.prefix.addr
         addr2 = node2.prefix.addr
@@ -446,20 +132,73 @@ class Aggradix(object):
             differ_bit = i * 8 + j
             break
 
-        return RadixPrefix(packed=common_addr, masklen=differ_bit)
+        return RadixPrefix(packed=common_addr, masklen=differ_bit)        
 
-    def differing_bit(self, addr1, addr2, check_bit=128):
+    def _subtree_sum(self, node):
         '''
-        [input]
-        addr1<bytearray>
-        addr2<bytearray>
-        check_bit<int>: 何ビット目まで見るか
+        Args:
+            sibling (AggradixNode): root node of subtree.
+        Returns:
+            int: sum of count of all nodes in subtree
+        '''
+        if node == None:
+            return 0
+        
+        count = sum(node.data["count"].values())
+        count += self._subtree_sum(node.left)
+        count += self._subtree_sum(node.right)
+        return count
 
-        [output]
-        differ_bit<int>: 一致するビット数またはcheck_bit
+    def _subtree_merge(self, node, is_root=False):
+        if node is None:
+            return {"count": {}}
+        
+        data = node.data
+        if node.prefix.bitlen == 128:
+            if "respond" not in data.keys():
+                data["respond"] = {}
+            init_or_add(data["respond"], str(node.prefix), node.data["count"])
 
-        [description]
-        [0:check_bit]番目のaddr1とaddr2のビット列で，何ビットまで等しいかを求める
+        left_data = self._subtree_merge(node.left)
+        for k, v in left_data["count"].items():
+            init_or_add(data["count"], k, v)
+        if "respond" in left_data.keys():
+            if "respond" not in data.keys():
+                data["respond"] = {}
+            data["respond"].update(left_data["respond"])
+
+        right_data = self._subtree_merge(node.right)
+        for k, v in right_data["count"].items():
+            init_or_add(data["count"], k, v)
+
+        if "respond" in right_data.keys():
+            if "respond" not in data.keys():
+                data["respond"] = {}
+            data["respond"].update(right_data["respond"])
+
+        if is_root:
+            node.data = data
+
+        else:
+            if node.parent.left == node:
+                node.parent.left = None
+            else:
+                node.parent.right = None
+            self.free_nodes += 1
+
+            node.reset()
+            self._lru_move_tail(node)
+
+        return data
+
+    def _differ_bit(self, addr1, addr2, check_bit = 128):
+        '''
+        Args:
+            addr1 (bytearray): address 1
+            addr2 (bytearray): address 2
+            checkbit (int): 何ビット目までチェックするか
+        Returns:
+            int: min(addr1とaddr2の一致するビット数, check_bit)
         '''
         differ_bit = 0
         i = 0
@@ -474,295 +213,190 @@ class Aggradix(object):
                     break
             differ_bit = i * 8 + j
             break
-
-        # differ_bit > check_bitだった場合はcheck_bitを返す
+        
         return check_bit if differ_bit > check_bit else differ_bit
 
-    def prefix_cmp(self, node_prefix, insert_prefix):
+    def add(self, prefix):
         '''
-        [input]
-        node_prefix<RadixPrefix>: 探索中の対象ノードのプレフィクス
-        insert_prefix<RadixPrefix>: 挿入したいアドレスのプレフィクス
+        1. add without using RadixGlue
+        2. do not append node under aggregated node
 
-        [output]
-        True | False <Bool>
-
-        [description]
-        node_prefixのプレフィクス長までのビット列の値が全て同じかどうか
+        Args:
+            prefix (RadixPrefix): prefix to be added
         '''
-        node_addr = node_prefix.addr
-        insert_addr = insert_prefix.addr
-        differ_bit = self.differing_bit(node_addr, insert_addr, check_bit=node_prefix.bitlen)
+        addr = prefix.addr
+        bitlen = prefix.bitlen
 
-        # ノードのプレフィクス長までnode_addrとinsert_addrのビットの値が全て同じ場合
-        ## insert_addrはnode_prefixに含まれる
-        return differ_bit == node_prefix.bitlen
+        # find proper position to insert given prefix.
+        node = self.head
+        while node.bitlen < bitlen:
+            # right or left
+            if (node.bitlen < self.maxbits and self._addr_test(addr, node.bitlen)):
+                if node.right is None:
+                    break
+                node = node.right
+            else:
+                if node.left is None:
+                    break
+                node = node.left
 
-    def prefix_match(self, prefix1, prefix2, bitlen):
-        '''
-        [input]
-        prefix1 <RadixPrefix>
-        prefix2 <RadixPrefix>
-        bitlen <int>
-
-        [output]
-        match <Bool>
-
-        [description]
-        prefix1とprefix2のaddressがbitlenの長さまで同一かどうか
-        '''
-        addr1 = prefix1.addr
-        addr2 = prefix2.addr
-        if addr1 is None or addr2 is None:
-            return False
-        quotient, remainder = divmod(bitlen, 8)
-        if addr1[:quotient] != addr2[:quotient]:
-            return False
-        if remainder == 0:
-            return True
-        mask = (~0) << (8 - remainder)
-        if (addr1[quotient] & mask) == (addr2[quotient] & mask):
-            return True
-        return False 
-
-    def bit_test(self, node, bitnum):
-        '''
-        [input]
-        node<RadixNode>
-        bitlen<int>:
-
-        [output]
-        0 | 1 <int>
-
-        [description]
-        node.addrのbitnum番目が0か1かを返す
-        '''
-        bitpos = [0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01]
-        offset = (bitnum-1)//8
-        return node.prefix.addr[offset] & bitpos[(bitnum-1)&7]
-
-    def bit_set(self, node, bitnum):
-        '''
-        [input]
-        node<RadixNode>
-        bitnum<int>
-
-        [description]
-        node.addrのbitnum番目のビットを1にする
-        '''
-        bitpos = [0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01]
-        offset = (bitnum-1)//8
-        node.prefix.addr[offset] |= bitpos[(bitnum-1) & 7]
-
-    def lru_get_free(self):
-        '''
-        キャッシュの中からフリーなノードを取り出す
-        '''
-        entry = self.cache.head.prev
-        while entry is not None:
-            if entry.empty or not entry.value.free:
-                entry = entry.prev
-                continue
-
-            return entry.value
-    def lru_get_active(self):
-        '''
-        最も使われていないアクティブなleafノードを取り出す
-        '''
-        entry = self.last_leaf_cache
-        while entry != self.last_leaf_cache.next:
-            # freeノードならば次へ
-            if entry.empty or entry.value.free or entry.value.right is not None:
-                entry = entry.prev
-                continue
-
-            self.last_leaf_cache = entry.prev
-            if entry.value is None:
-                print(f'strange: {entry.value}, {entry.prev.value}')
-            return entry.value
-
-    def lru_move_tail(self, node):
-        '''
-        nodeをlruの一番うしろに持ってくる
-        '''
-        ## LRU cacheから対象ノードを探索する
-        self.cache[node.node_id] = node
-        entry = self.cache.head
-
-        ## つなぎ替える
-        self.cache.head = entry.next
-        if self.cache.head.prev.value.node_id != node.node_id:
-            print("not")
-
-    def leaf_alloc(self, node, prefix):
-        '''
-        leafを2つ作る．
-        '''
-        leaf = self.lru_get_free()
-        leaf.set(prefix)
-        self.cache[leaf.node_id] = leaf
-        branch = self.lru_get_free()
-        branch.set(self.common_prefix(node, leaf))
-        self.cache[branch.node_id] = branch
-        self.free_nodes -= 2
-
-        # 共通プレフィクス長がnodeのプレフィクス長と等しい場合
-        if (branch.prefix.bitlen == node.prefix.bitlen):
-            node.left = branch
-            node.right = leaf
-
-            branch.bitlen = 128
-            branch.parent = node
-            leaf.parent = node
+        # differ_bit: how many bits differ between addr and test_addr
+        test_addr = node.prefix.addr
+        check_bit = node.bitlen if node.bitlen < bitlen else bitlen
+        differ_bit = self._differ_bit(addr, test_addr, check_bit)
         
-        # 共通プレフィクスがnodeのプレフィクスよりも深い
-        elif (branch.prefix.bitlen > node.prefix.bitlen):
-            self.bit_set(branch, node.prefix.bitlen+1)
-            node.left = leaf
-            node.right = branch
+        parent = node.parent
+        while parent and parent.bitlen >= differ_bit:
+            node, parent = parent, node.parent
 
-            branch.bitlen = 128
-            branch.parent = node
-            leaf.parent = node
+        if differ_bit == bitlen and node.bitlen ==bitlen:
+            return node
 
-        # 共通プレフィクスがnodeのプレフィクスよりも浅い
-        ## node.bitlen==128である場合など, branchの下にnodeとleafを配置
+        if node.parent and "aggregated" in node.data.keys():
+            print(f'{node} is aggregated node')
+            return node
+
+        new_node = self._lru_get_free()
+        new_node.set(prefix)
+        self.free_nodes -= 1
+
+        if node.bitlen == differ_bit:
+            new_node.parent = node
+            if (node.bitlen < self.maxbits and self._addr_test(addr, node.bitlen)):
+                node.right = new_node
+            else:
+                node.left = new_node
+            return new_node
+        
+        if bitlen == differ_bit:
+            if bitlen < self.maxbits and self._addr_test(test_addr, bitlen):
+                new_node.right = node
+            else:
+                new_node.left = node
+
+            new_node.parent = node.parent
+
+            if node.parent is None:
+                self.head = new_node
+            elif node.parent.right == node:
+                node.parent.right = new_node
+            else:
+                node.parent.left = new_node
+            
+            node.parent = new_node
+
         else:
-            if (node.parent.left == node):
-                node.parent.left = branch
+            glue_node = self._lru_get_free()
+            glue_node.set(self._common_prefix(node, new_node))
+            self.free_nodes -= 1            
+            glue_node.parent = node.parent
+
+            if differ_bit < self.maxbits and self._addr_test(addr, differ_bit):
+                glue_node.right = new_node
+                glue_node.left = node
             else:
-                node.parent.right = branch
-
-            branch.parent = node.parent
-
-            if self.bit_test(leaf, branch.bitlen+1):
-                branch.left = node
-                branch.right = leaf
-            else:
-                branch.left = leaf
-                branch.right = node
-            node.parent = branch
-            leaf.parent = branch
-
-        return leaf
-
-    def leaf_free(self, leaf):
-        '''
-        leafとその親(branch point)を親ノードにマージ
-        '''
-        branch_point = leaf.parent
-        parent = branch_point.parent
-
-        data = parent.data
-        for k, v in leaf.data.items():
-            if k in data.keys():
-                data[k] += v
-            else:
-                data[k] = v
-
-        for k, v in branch_point.data.items():
-            if k in data.keys():
-                data[k] += v
-            else:
-                data[k] = v
-
-        if branch_point.left == leaf:
-            node = branch_point.right
-        else:
-            node = branch_point.left
+                glue_node.right = node
+                glue_node.left = new_node
         
-        if parent.left == branch_point:
-            parent.left = node
-        else:
-            parent.right = node
-
-        node.parent = parent
+            new_node.parent = glue_node
         
-        leaf.reset()
-        self.lru_move_tail(leaf)
-        branch_point.reset()
-        self.lru_move_tail(branch_point)
-        self.free_nodes += 2
-
-    def subtree_merge(self, node, depth=0):
-        if node is None:
-            return {}
-
-        data = node.data
-
-        data_left = self.subtree_merge(node.left, depth+1)
-        for k, v in data_left.items():
-            if k in data.keys():
-                data[k] += v
+            if node.parent is None:
+                self.head = glue_node
+            elif node.parent.right == node:
+                node.parent.right = glue_node
             else:
-                data[k] = v
-
-        data_right = self.subtree_merge(node.right, depth+1)
-        for k, v in data_right.items():
-            if k in data.keys():
-                data[k] += v
-            else:
-                data[k] = v
-
-        if depth > 0:
-            if node.parent.left == node:
-                node.parent.left = None
-            else:
-                node.parent.right = None
-            self.free_nodes += 1
-
-            node.reset()
-            self.lru_move_tail(node)
+                node.parent.left = glue_node
         
-        # 最初のコールだけ
-        elif (depth == 0):
-            node.data = data
-            # print(f'here {node}: {data}')
+            node.parent = glue_node
+        
+        return new_node            
 
-        return data
-
-    def reclaim_node(self, n):
+    def aggregate(self):
         '''
-        freenodeをn個減らす
-        しきい値はprobeの合計数とする
+        Aggregate Latest Recent Used Node.
         '''
-
-        # 対象となるノードを探索する
         loopcount = 0
-        while self.free_nodes < n:
-            # とても簡単な集約閾値を設定する
-            ## 合計パケット数と10の大きい方
+        while self.free_nodes < 2:
             thr = self.packet_count * 0.3 if self.packet_count > 10 else 10
 
-            leaf = self.lru_get_active()
-            if leaf is None:
-                print(f'strange: {leaf.node_id}')
-                # pprint(self.cache)
-
-            # leafのパケットの合計値が閾値より大きい場合は除外
-            if sum(leaf.data.values()) > thr and loopcount < 10:
-                self.cache[leaf.node_id] = leaf
+            leaf = self._lru_get_active()
+            
+            if sum(leaf.data["count"].values()) > thr and loopcount < 10:
+                self.nodes[leaf.node_id] = leaf
                 loopcount += 1
                 continue
-
+            if leaf.parent == self.head:
+                loopcount += 1
+                continue
+                
             parent = leaf.parent
-            if parent.left == leaf:
-                sibling = parent.right
-            else:
-                sibling = parent.left
+            sibling = parent.right if parent.left == leaf else parent.left
 
-            sibling_count = self.subtree_sum(sibling)
-            parent_count = sum(parent.data.values())
+            sibling_count = self._subtree_sum(sibling)
+            parent_count = sum(parent.data["count"].values())
 
             need_sibling = sibling_count > thr
             need_parent = (parent == self.head) or (parent_count > thr)
 
             if need_parent and need_sibling:
-                self.cache[leaf.node_id] = leaf
+                self.nodes[leaf.node_id] = leaf
                 loopcount += 1
                 continue
-            
             elif need_sibling:
-                self.leaf_free(leaf)
+                self._leaf_free(leaf, is_root=True)
             else:
-                self.subtree_merge(leaf.parent)
+                self._subtree_merge(leaf.parent, is_root=True)
+                leaf.parent.data["aggregated"] = True
+
+    def add_count(self, dst_addr, src_addr):
+        if self.free_nodes < 2:
+            self.aggregate()
+        
+        dst_prefix = RadixPrefix(f'{dst_addr}/128')
+        node = self.add(dst_prefix)
+        init_or_add(node.data["count"], src_addr, 1)
+        if "respond" in node.data.keys():
+            if str(dst_prefix) in node.data["respond"].keys():
+                if src_addr in node.data["respond"][str(dst_prefix)].keys():
+                    node.data["respond"][str(dst_prefix)][src_addr] += 1
+
+    def cat_tree(self, head = None):
+        print("**** aggradix dump ****")
+        print(f'freenode: {self.free_nodes}\n')
+        if head is None:
+            head = self.head
+        
+        stack = [(head, 0)]
+        while len(stack) > 0:
+            node, depth = stack.pop()
+            mark = " "
+            respond = False
+            if "aggregated" in node.data.keys():
+                mark = "*"
+                respond = "respond" in node.data.keys()
+
+            print(f'{"-"*depth*2} {mark} {node.prefix} -> {node.data["count"]}')
+            if respond:
+                for d, s in node.data["respond"].items():
+                    print(f'{" "*depth*2}     {d}: {s}')
+
+            if (node.left is not None):
+                stack.append((node.left, depth+1))
+            if (node.right is not None):
+                stack.append((node.right, depth+1))
+        print("**** dump fin ****\n")
+
+if __name__ == "__main__":
+    import ipaddress, random
+
+    aggradix = AggradixTree("2001:db8::/48", maxnode=32)
+    src_addresses = ["2001:db8:f::1", "2001:db8:f::1234"]
+    
+    base = ipaddress.ip_address("2001:db8::")
+    dst_addrs = []
+    for i in range(32):
+        dst_addrs.append(base + random.randint(0, 2**(128-48)))
+    
+    for dst_addr in dst_addrs*3:
+        aggradix.add_count(str(dst_addr), src_addresses[i%2])
+        aggradix.cat_tree()

@@ -1,6 +1,5 @@
 import pylru
-from radix import RadixNode, RadixPrefix, RadixTree
-from pprint import pprint
+from .radix import RadixNode, RadixPrefix, RadixTree
 
 def init_or_add(dic, key, val):
     if key in dic.keys():
@@ -310,6 +309,18 @@ class AggradixTree(RadixTree):
             node.parent = glue_node
         
         return new_node            
+
+    def search_covered(self, _prefix):
+        super().search_covered(RadixPrefix(_prefix))
+
+    def search_best(self, _prefix):
+        super().search_best(RadixPrefix(_prefix))
+
+    def search_exact(self, _prefix):
+        super().search_exact(RadixPrefix(_prefix))
+
+    def search_worst(self, _prefix):
+        super().search_worst(RadixPrefix(_prefix))
 
     def aggregate(self):
         '''

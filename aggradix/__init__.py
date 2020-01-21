@@ -1,5 +1,5 @@
 from .radix import RadixNode, RadixPrefix
-from .aggradix import Aggradix
+from .aggradix import AggradixTree, AggradixNode
 
 __version__ = '0.0.1'
-__all__ = ['Aggradix', 'RadixNode', 'RadixPrefix']
+__all__ = ['AggradixTree', 'AggradixNode', 'RadixNode', 'RadixPrefix']

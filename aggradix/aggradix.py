@@ -189,6 +189,46 @@ class AggradixTree(RadixTree):
             self._lru_move_tail(node)
 
         return data
+    
+    def _leaf_free(self, leaf):
+        '''
+        Args:
+            node: 親ノードにマージするノード
+        '''
+        branch_point = leaf.parent
+        parent = branch_point.parent
+
+        data = parent.data
+        if leaf.prefix.bitlen == 128:
+            if "respond" not in data.keys():
+                data["respond"] = {}
+            init_or_add(data["respond"], str(leaf.prefix), leaf.data["count"])
+
+        for k, v in branch_point.data["count"].items():
+            init_or_add(data["count"], k, v)
+
+        if "respond" in branch_point.data.keys():
+            if "respond" not in data.keys():
+                data["respond"] = {}
+            data["respond"].update(branch_point.data["respond"])
+
+        if branch_point.left == leaf:
+            node = branch_point.right
+        else:
+            node = branch_point.left
+        
+        if parent.left == branch_point:
+            parent.left = node
+        else:
+            parent.right = node
+
+        node.parent = parent
+        
+        leaf.reset()
+        self._lru_move_tail(leaf)
+        branch_point.reset()
+        self._lru_move_tail(branch_point)
+        self.free_nodes += 2
 
     def _differ_bit(self, addr1, addr2, check_bit = 128):
         '''
@@ -252,7 +292,7 @@ class AggradixTree(RadixTree):
             return node
 
         if node.parent and "aggregated" in node.data.keys():
-            print(f'{node} is aggregated node')
+            # print(f'{node} is aggregated node')
             return node
 
         new_node = self._lru_get_free()
@@ -354,9 +394,9 @@ class AggradixTree(RadixTree):
                 loopcount += 1
                 continue
             elif need_sibling:
-                self._leaf_free(leaf, is_root=True)
+                self._leaf_free(leaf)
             else:
-                self._subtree_merge(leaf.parent, is_root=True)
+                self._subtree_merge(leaf.parent, True)
                 leaf.parent.data["aggregated"] = True
 
     def add_count(self, dst_addr, src_addr):

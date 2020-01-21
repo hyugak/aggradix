@@ -358,7 +358,6 @@ class Aggradix(object):
 
         return h
 
-
     def weighted_count(self, src_address, dst_address, masklen):
         '''
         dst_address/masklenに含まれるノードのうち，dst_address/128を含む枝の
@@ -565,6 +564,7 @@ class Aggradix(object):
                 continue
 
             return entry.value
+
     def lru_get_active(self):
         '''
         最も使われていないアクティブなleafノードを取り出す

@@ -350,17 +350,112 @@ class AggradixTree(RadixTree):
         
         return new_node            
 
-    def search_covered(self, _prefix):
-        super().search_covered(RadixPrefix(_prefix))
+    def search_covered(self, _prefix, head = None):
+        if self.head is None:
+            return None
 
-    def search_best(self, _prefix):
-        super().search_best(RadixPrefix(_prefix))
+        prefix = RadixPrefix(_prefix)
+        if head is None:
+            head = self.head
 
-    def search_exact(self, _prefix):
-        super().search_exact(RadixPrefix(_prefix))
+        # headのプレフィクス長が検索するプレフィクスのプレフィクス長より長い場合
+        # 同じか短くなるまで木を上に探索
+        while prefix.bitlen > head.prefix.bitlen:
+            if head.parent is None:
+                break
+            head = head.parent
+
+        results = []
+        node = head
+        addr = prefix.addr
+        bitlen = prefix.bitlen
+
+        while node.bitlen < bitlen:
+            if self._addr_test(addr, node.bitlen):
+                node = node.right
+            else:
+                node = node.left
+            
+            if node is None:
+                return results
+
+        stack = [node]
+        while stack:
+            node = stack.pop()
+            if self._prefix_match(node.prefix, prefix, prefix.bitlen):
+                results.append(node)
+            if node.right:
+                stack.append(node.right)
+            if node.left:
+                stack.append(node.left)
+        
+        return results
+
+    def search_best(self, _prefix, head = None):
+        if self.head is None:
+            return None
+
+        prefix = RadixPrefix(_prefix)
+        if head is None:
+            head = self.head
+        
+        node = head
+        addr = prefix.addr
+        bitlen = prefix.bitlen
+
+        stack = []
+        while node.bitlen < bitlen:
+            stack.append(node)
+            if self._addr_test(addr, node.bitlen):
+                node = node.right
+            else:
+                node = node.left
+            
+            if node is None:
+                break
+
+        if node is not None:
+            stack.append(node)
+        
+        if len(stack) <= 0:
+            return None
+        
+        for node in stack[::-1]:
+            if (self._prefix_match(node.prefix, prefix, node.bitlen)) and node.bitlen <= bitlen:
+                return node
+        return None
+
+    def search_exact(self, _prefix, head = None):
+        if self.head is None:
+            return None
+
+        prefix = RadixPrefix(_prefix)
+        if head is None:
+            head = self.head
+
+        node = head
+        addr = prefix.addr
+        bitlen = prefix.bitlen
+
+        while node.bitlen < bitlen:
+            if self._addr_test(addr, node.bitlen):
+                node = node.right
+            else:
+                node = node.left
+
+            if node is None:
+                return None
+
+        if node.bitlen > bitlen:
+            return None
+
+        if self._prefix_match(node.prefix, prefix, bitlen):
+            return node
+        
+        return None
 
     def search_worst(self, _prefix):
-        super().search_worst(RadixPrefix(_prefix))
+        return super().search_worst(RadixPrefix(_prefix))
 
     def aggregate(self):
         '''
@@ -407,9 +502,9 @@ class AggradixTree(RadixTree):
         node = self.add(dst_prefix)
         init_or_add(node.data["count"], src_addr, 1)
         if "respond" in node.data.keys():
-            if str(dst_prefix) in node.data["respond"].keys():
-                if src_addr in node.data["respond"][str(dst_prefix)].keys():
-                    node.data["respond"][str(dst_prefix)][src_addr] += 1
+            if dst_addr in node.data["respond"].keys():
+                if src_addr in node.data["respond"][dst_addr].keys():
+                    node.data["respond"][dst_addr][src_addr] += 1
 
     def cat_tree(self, head = None):
         print("**** aggradix dump ****")

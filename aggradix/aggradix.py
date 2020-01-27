@@ -446,7 +446,7 @@ class AggradixTree(RadixTree):
             self._subtree_merge(parent, True)
             parent.aggregated = True
 
-    def add_count(self, dst_addr, src_addr, respond = False):
+    def add_count(self, src_addr, dst_addr, respond = False):
         if self.free_nodes < 2:
             self.aggregate()
         
@@ -504,6 +504,6 @@ if __name__ == "__main__":
     
     for dst_addr in dst_addrs*3:
         import pdb; pdb.set_trace()
-        aggradix.add_count(str(dst_addr), src_addresses[i%2], True)
+        aggradix.add_count(src_addresses[i%2], str(dst_addr), True)
         print(str(dst_addr))
         aggradix.cat_tree()

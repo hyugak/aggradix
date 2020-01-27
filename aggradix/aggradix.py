@@ -254,15 +254,15 @@ class AggradixTree(RadixTree):
         if differ_bit == bitlen and node.bitlen ==bitlen:
             return node
 
-        new_node = self._lru_get_free()
-        new_node.set(prefix)
-        self.free_nodes -= 1
-
         if node.aggregated and node.bitlen == differ_bit:
             # nodeが集約済みノードであった場合
             # nodeのプレフィクス長と, addrとnodeの共通ビット数が同じ場合
             # addrはnodeのプレフィクスに含まれる
                 return node
+
+        new_node = self._lru_get_free()
+        new_node.set(prefix)
+        self.free_nodes -= 1
 
         if node.bitlen == differ_bit:
             new_node.parent = node

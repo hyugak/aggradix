@@ -1,5 +1,9 @@
 import pylru
-from .radix import RadixNode, RadixPrefix, RadixTree
+import json
+try:
+    from .radix import RadixNode, RadixPrefix, RadixTree
+except ModuleNotFoundError:
+    from radix import RadixNode, RadixPrefix, RadixTree
 
 def init_or_add(dic, key, val):
     if key in dic.keys():
@@ -40,6 +44,18 @@ class AggradixNode(RadixNode):
         self.aggregated = False
         self.probed = {}
         self.respond = {}
+
+    def to_json(self):
+        dic = {
+            "node_id": self.node_id,
+            "prefix": str(self.prefix),
+            "aggregated": self.aggregated,
+            "probed": self.probed,
+            "respond": self.respond,
+            "right": self.right.node_id if self.right else None,
+            "left": self.left.node_id if self.left else None,
+        }
+        return json.dumps(dic)
     
     def __str__(self):
         return str(self.prefix)
@@ -476,7 +492,6 @@ class AggradixTree(RadixTree):
             mark = " "
             if node.aggregated:
                 mark = "*"
-
             print(f'{"-"*depth*2} {mark} {node.prefix}')
             # print(f'{" "*depth*2}     %%probed')
             # for d, s in node.probed.items():
@@ -503,7 +518,6 @@ if __name__ == "__main__":
         dst_addrs.append(base + random.randint(0, 2**(128-48)))
     
     for dst_addr in dst_addrs*3:
-        import pdb; pdb.set_trace()
         aggradix.add_count(src_addresses[i%2], str(dst_addr), True)
         print(str(dst_addr))
-        aggradix.cat_tree()
+    aggradix.cat_tree()

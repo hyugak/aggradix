@@ -63,7 +63,7 @@ class AggradixNode(RadixNode):
 class AggradixTree(RadixTree):
     def __init__(self, prefix, maxnode=64):
         super(AggradixTree, self).__init__()
-        head = AggradixNode(node_id=-1)
+        head = AggradixNode(node_id=0)
         head.set(RadixPrefix(prefix))
         self.head = head
         self.maxnode = maxnode - 1

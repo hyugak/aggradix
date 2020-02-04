@@ -52,6 +52,7 @@ class AggradixNode(RadixNode):
             "aggregated": self.aggregated,
             "probed": self.probed,
             "respond": self.respond,
+            "parent": self.parent.node_id if self.parent else None,
             "right": self.right.node_id if self.right else None,
             "left": self.left.node_id if self.left else None,
         }
@@ -489,16 +490,17 @@ class AggradixTree(RadixTree):
         stack = [(head, 0)]
         while len(stack) > 0:
             node, depth = stack.pop()
-            mark = " "
-            if node.aggregated:
-                mark = "*"
-            print(f'{"-"*depth*2} {mark} {node.prefix}')
-            # print(f'{" "*depth*2}     %%probed')
-            # for d, s in node.probed.items():
+            # mark = " "
+            # if node.aggregated:
+            #     mark = "*"
+            # print(f'{"-"*depth*2} {mark} {node.prefix}')
+            # # print(f'{" "*depth*2}     %%probed')
+            # # for d, s in node.probed.items():
+            # #     print(f'{" "*depth*2}     {d}: {s}')
+            # print(f'{" "*depth*2}     %%respond')
+            # for d, s in node.respond.items():
             #     print(f'{" "*depth*2}     {d}: {s}')
-            print(f'{" "*depth*2}     %%respond')
-            for d, s in node.respond.items():
-                print(f'{" "*depth*2}     {d}: {s}')
+            print(node.to_json())
 
             if (node.left is not None):
                 stack.append((node.left, depth+1))

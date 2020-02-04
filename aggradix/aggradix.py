@@ -18,9 +18,9 @@ def init_or_update(dic, key, val):
         dic[key] = val
 
 class AggradixNode(RadixNode):
-    n_node = 0
+    n_node = 1
 
-    def __init__(self, node_id=None):
+    def __init__(self, node_id=None, attr=None):
         super(AggradixNode, self).__init__()
         if node_id is None:
             self.node_id = AggradixNode.n_node
@@ -28,6 +28,16 @@ class AggradixNode(RadixNode):
         else:
             self.node_id = node_id
         self.aggregated = False
+        self.probed = {}
+        self.respond = {}
+    
+    def set_attr(self, attr):
+        self.prefix = RadixPrefix(attr["prefix"])
+        self.bitlen = self.prefix.bitlen
+        self.probed = attr["probed"]
+        self.respond = attr["respond"]
+        self.aggregated = attr["aggregated"]
+        self.free = False
 
     def set(self, prefix):
         self.prefix = prefix
@@ -62,21 +72,62 @@ class AggradixNode(RadixNode):
         return str(self.prefix)
 
 class AggradixTree(RadixTree):
-    def __init__(self, prefix, maxnode=64):
+    def __init__(self, prefix="::/0", maxnode=64, repair_path=None):
         super(AggradixTree, self).__init__()
-        head = AggradixNode(node_id=0)
-        head.set(RadixPrefix(prefix))
-        self.head = head
-        self.maxnode = maxnode - 1
-        self.free_nodes = self.maxnode
-        self.packet_count = 0
+        if repair_path is None:
+            head = AggradixNode(node_id=0)
+            head.set(RadixPrefix(prefix))
+            self.head = head
+            self.maxnode = maxnode - 1
+            self.free_nodes = self.maxnode
+            self.packet_count = 0
+            self.nodes = pylru.lrucache(self.maxnode)
+            self.active_leaf_cache = self.nodes.head.prev
+            self._lru_init()
+        else:                                               
+            self._repair(repair_path)
+
+    def _repair(self, path):
+        with open(path, "r") as f:
+            data = json.load(f)
+
+        self.maxnode = data["maxnode"]
+        self.free_nodes = data["free_nodes"]
+        self.packet_count = data["packet_count"]
         self.nodes = pylru.lrucache(self.maxnode)
-        self.active_leaf_cache = self.nodes.head.prev
         self._lru_init()
+
+        self.head = AggradixNode(node_id=0)
+        self.head.set_attr(attr=data["nodes"][0])
+        right_id = data["nodes"][0]["right"]
+        left_id = data["nodes"][0]["left"]
+        self.head.right = self.nodes[right_id] if data["nodes"][0]["right"] else None
+        self.head.left = self.nodes[left_id] if data["nodes"][0]["left"] else None
+
+        for attr in data["nodes"][1:]:
+            node_id = attr["node_id"]
+            node = self.nodes[node_id]
+
+            node.set_attr(attr=attr)
+            right_id = attr["right"]
+            left_id = attr["left"]
+            node.right = self.nodes[right_id] if attr["right"] else None
+            node.left = self.nodes[left_id] if attr["left"] else None
+
+            parent_id = attr["parent"]
+            if parent_id is not None:
+                if parent_id == 0:
+                    parent = self.head
+                else:
+                    parent = self.nodes[parent_id]
+                node.parent = parent
+        
+        for i in data["lrucache"][::-1]:
+            self.nodes[i] = i
 
     def _lru_init(self):
         for i in range(self.maxnode):
-            self.nodes[i] = AggradixNode()
+            self.nodes[i+1] = AggradixNode(i+1)
 
     def _lru_get_free(self):
         '''
@@ -469,6 +520,7 @@ class AggradixTree(RadixTree):
         
         dst_prefix = RadixPrefix(f'{dst_addr}/128')
         node = self.add(dst_prefix)
+        self.nodes[node.node_id] = node
 
         # プローブを受けた回数を加算
         init_or_add(node.probed, src_addr, 1)
@@ -480,6 +532,31 @@ class AggradixTree(RadixTree):
             if src_addr not in node.respond[dst_addr].keys():
                 node.respond[dst_addr][src_addr] = 0
             node.respond[dst_addr][src_addr] += 1
+
+    def dump_tree(self, dump_path):
+        head = self.head
+        with open(dump_path, "w") as f:
+
+            f.write('{')
+            f.write(f'"free_nodes": {self.free_nodes}, ')
+            f.write(f'"packet_count": {self.packet_count}, ')
+            f.write(f'"maxnode": {self.maxnode}, ')
+            f.write('"nodes": [')
+            stack = [(head, 0)]
+            while len(stack) > 0:
+                node, depth = stack.pop()
+                if depth != 0:
+                    f.write(',')
+
+                f.write(f'{node.to_json()}')
+
+                if (node.right is not None):
+                    stack.append((node.right, depth+1))
+                if (node.left is not None):
+                    stack.append((node.left, depth+1))
+            f.write('],')
+            f.write(f'"lrucache": {json.dumps(list(self.nodes.keys()))}')
+            f.write('}')
 
     def cat_tree(self, head = None):
         print("**** aggradix dump ****")
@@ -511,15 +588,19 @@ class AggradixTree(RadixTree):
 if __name__ == "__main__":
     import ipaddress, random
 
-    aggradix = AggradixTree("2001:db8::/48", maxnode=8)
-    src_addresses = ["2001:db8:f::1", "2001:db8:f::1234"]
+    # aggradix = AggradixTree("2001:db8::/48", maxnode=8)
+    # src_addresses = ["2001:db8:f::1", "2001:db8:f::1234"]
     
-    base = ipaddress.ip_address("2001:db8::")
-    dst_addrs = []
-    for i in range(8):
-        dst_addrs.append(base + random.randint(0, 2**(128-48)))
+    # base = ipaddress.ip_address("2001:db8::")
+    # dst_addrs = []
+    # for i in range(8):
+    #     dst_addrs.append(base + random.randint(0, 2**(128-48)))
     
-    for dst_addr in dst_addrs*3:
-        aggradix.add_count(src_addresses[i%2], str(dst_addr), True)
-        print(str(dst_addr))
-    aggradix.cat_tree()
+    # for dst_addr in dst_addrs*3:
+    #     aggradix.add_count(src_addresses[i%2], str(dst_addr), True)
+    #     print(str(dst_addr))
+    # aggradix.cat_tree()
+
+    aggradix = AggradixTree("2001:db8::/48", maxnode=8192, repair_path="dump.txt")
+    # aggradix.cat_tree()
+    aggradix.dump_tree("dump2.txt")
